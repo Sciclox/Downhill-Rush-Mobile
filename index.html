@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Downhill Rush - Extreme Mountain Bike</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    body, html {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: #0b0f19;
+      color: #ffffff;
+      touch-action: none;
+    }
+
+    #game-container {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 1;
+    }
+
+    /* HUD OVERLAYS */
+    #hud {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 10;
+      pointer-events: none;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: env(safe-area-inset-top, 16px) env(safe-area-inset-right, 16px) env(safe-area-inset-bottom, 16px) env(safe-area-inset-left, 16px);
+    }
+
+    /* TOP BAR */
+    .top-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      width: 100%;
+      padding: 8px 12px;
+      gap: 12px;
+    }
+
+    .stat-pill {
+      background: rgba(15, 23, 42, 0.75);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 20px;
+      padding: 6px 14px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-weight: 700;
+      font-size: 14px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    }
+
+    .progress-container {
+      flex: 1;
+      max-width: 280px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .progress-track {
+      width: 100%;
+      height: 8px;
+      background: rgba(255, 255, 255, 0.2);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      width: 0%;
+      height: 100%;
+      background: linear-gradient(90deg, #ff3b00, #ffaa00);
+      transition: width 0.1s linear;
+    }
+
+    /* SPEEDOMETER */
+    .speedometer-box {
+      position: absolute;
+      top: 70px;
+      right: 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      background: rgba(15, 23, 42, 0.65);
+      backdrop-filter: blur(6px);
+      padding: 8px 14px;
+      border-radius: 14px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .speed-number {
+      font-size: 38px;
+      font-weight: 900;
+      letter-spacing: -1px;
+      color: #00ffcc;
+      text-shadow: 0 0 16px rgba(0, 255, 204, 0.5);
+      line-height: 1;
+    }
+
+    .speed-unit {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: rgba(255, 255, 255, 0.6);
+    }
+
+    .nitro-bar-wrap {
+      width: 70px;
+      height: 4px;
+      background: rgba(255, 255, 255, 0.2);
+      border-radius: 2px;
+      margin-top: 6px;
+      overflow: hidden;
+    }
+
+    .nitro-bar-fill {
+      width: 0%;
+      height: 100%;
+      background: #00ffcc;
+      box-shadow: 0 0 8px #00ffcc;
+      transition: width 0.05s linear;
+    }
+
+    /* BANNER ALERTS */
+    #alert-banner {
+      position: absolute;
+      top: 40%;
+      left: 50%;
+      transform: translate(-50%, -50%) scale(0.8);
+      font-size: 32px;
+      font-weight: 900;
+      text-align: center;
+      text-shadow: 0 4px 20px rgba(0, 0, 0, 0.8);
+      opacity: 0;
+      transition: all 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      pointer-events: none;
+    }
+
+    #alert-banner.visible {
+      opacity: 1;
+      transform: translate(-50%, -50%) scale(1.15);
+    }
+
+    /* TOUCH CONTROLS */
+    .touch-controls {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      width: 100%;
+      padding-bottom: 20px;
+      pointer-events: auto;
+    }
+
+    .control-cluster-left, .control-cluster-right {
+      display: flex;
+      gap: 14px;
+      align-items: center;
+    }
+
+    .touch-btn {
+      width: 74px;
+      height: 74px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.12);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      border: 2px solid rgba(255, 255, 255, 0.25);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      font-weight: 800;
+      font-size: 13px;
+      letter-spacing: 0.5px;
+      color: #ffffff;
+      touch-action: none;
+      transition: transform 0.08s ease, background 0.08s ease, border-color 0.08s ease;
+      cursor: pointer;
+    }
+
+    .touch-btn svg {
+      width: 28px;
+      height: 28px;
+      fill: #ffffff;
+    }
+
+    .touch-btn.active {
+      transform: scale(0.92);
+      background: rgba(255, 255, 255, 0.35);
+      border-color: #00ffcc;
+      box-shadow: 0 0 16px rgba(0, 255, 204, 0.6);
+    }
+
+    .touch-btn.pedal {
+      width: 84px;
+      height: 84px;
+      background: rgba(0, 210, 211, 0.25);
+      border-color: rgba(0, 210, 211, 0.5);
+    }
+
+    .touch-btn.pedal.active {
+      background: rgba(0, 210, 211, 0.6);
+      border-color: #00ffcc;
+    }
+
+    .touch-btn.brake {
+      background: rgba(255, 71, 87, 0.25);
+      border-color: rgba(255, 71, 87, 0.5);
+    }
+
+    .touch-btn.brake.active {
+      background: rgba(255, 71, 87, 0.6);
+      border-color: #ff4757;
+    }
+
+    /* DESKTOP HINT */
+    .desktop-hint {
+      position: absolute;
+      bottom: 8px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 11px;
+      color: rgba(255, 255, 255, 0.45);
+      pointer-events: none;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+    }
+
+    /* FINISH OVERLAY */
+    #finish-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(11, 15, 25, 0.85);
+      backdrop-filter: blur(12px);
+      z-index: 50;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      gap: 16px;
+      pointer-events: auto;
+      transition: opacity 0.3s ease;
+    }
+
+    #finish-overlay.hidden {
+      display: none;
+    }
+
+    .finish-card {
+      background: rgba(30, 41, 59, 0.9);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 24px;
+      padding: 32px 40px;
+      text-align: center;
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+      max-width: 320px;
+      width: 90%;
+    }
+
+    .finish-title {
+      font-size: 32px;
+      font-weight: 900;
+      color: #ffaa00;
+      letter-spacing: -0.5px;
+      margin-bottom: 8px;
+    }
+
+    .finish-score {
+      font-size: 48px;
+      font-weight: 900;
+      color: #00ffcc;
+      margin: 12px 0;
+    }
+
+    .btn-action {
+      background: linear-gradient(135deg, #ff3b00, #ffaa00);
+      border: none;
+      color: white;
+      font-weight: 800;
+      font-size: 16px;
+      padding: 14px 28px;
+      border-radius: 14px;
+      cursor: pointer;
+      box-shadow: 0 8px 20px rgba(255, 59, 0, 0.4);
+      transition: transform 0.1s ease;
+      width: 100%;
+      margin-top: 12px;
+    }
+
+    .btn-action:active {
+      transform: scale(0.96);
+    }
+  </style>
+</head>
+<body>
+  <div id="game-container"></div>
+
+  <!-- HUD -->
+  <div id="hud">
+    <div class="top-bar">
+      <div class="stat-pill">
+        <span>⭐</span>
+        <span id="coins-value">0</span>
+      </div>
+
+      <div class="progress-container">
+        <div class="progress-track">
+          <div id="progress-fill" class="progress-fill"></div>
+        </div>
+      </div>
+
+      <div class="stat-pill">
+        <span>PTS</span>
+        <span id="score-value">0</span>
+      </div>
+    </div>
+
+    <!-- Speedometer -->
+    <div class="speedometer-box">
+      <div class="speed-number" id="speed-value">0</div>
+      <div class="speed-unit">KM/H</div>
+      <div class="nitro-bar-wrap">
+        <div id="nitro-fill" class="nitro-bar-fill"></div>
+      </div>
+    </div>
+
+    <!-- Alert / Wipeout Banner -->
+    <div id="alert-banner">WIPEOUT!</div>
+
+    <!-- Touch Controls for Mobile Screens -->
+    <div class="touch-controls">
+      <!-- Left cluster: Steering -->
+      <div class="control-cluster-left">
+        <div id="touch-left" class="touch-btn">
+          <svg viewBox="0 0 24 24"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
+        </div>
+        <div id="touch-right" class="touch-btn">
+          <svg viewBox="0 0 24 24"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
+        </div>
+      </div>
+
+      <!-- Right cluster: Drive / Brake -->
+      <div class="control-cluster-right">
+        <div id="touch-brake" class="touch-btn brake">
+          <span>FRENO</span>
+        </div>
+        <div id="touch-pedal" class="touch-btn pedal">
+          <span>PEDAL</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="desktop-hint">PC: Flechas / WASD para conducir y pedalear</div>
+  </div>
+
+  <!-- Finish Modal -->
+  <div id="finish-overlay" class="hidden">
+    <div class="finish-card">
+      <div class="finish-title">¡META ALCANZADA!</div>
+      <p style="color: rgba(255,255,255,0.7); font-size: 14px;">Descenso completado</p>
+      <div class="finish-score" id="final-score">0</div>
+      <p style="color: #00ffcc; font-weight: 700; font-size: 13px;">PUNTUACIÓN TOTAL</p>
+      <button id="btn-restart" class="btn-action">JUGAR DE NUEVO</button>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
