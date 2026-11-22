@@ -1,58 +1,68 @@
 import * as THREE from 'three';
 
 /**
- * BikePhysics: High performance arcade downhill physics simulator.
- * Calculates gravity along slope, pedal drive, braking, air rotation tricks,
- * kicker ramps, boost pads, and impact landing tolerance.
+ * Dual-Wheel Downhill Physics Simulator with True Terrain Conformity.
+ * Probes terrain independently at both wheels to mathematically eliminate
+ * floor sinking, polygon clipping, and glitching on steep slopes.
  */
 export class BikePhysics {
   constructor(trackManager, bikeEntity) {
     this.track = trackManager;
     this.bike = bikeEntity;
 
-    // Spatial State
-    this.distance = 15.0; // Distance along track spline
-    this.lateralOffset = 0.0; // Lateral position (-trackWidth/2 to +trackWidth/2)
-    this.verticalOffset = 0.0; // Height above ground (for airtime/jumps)
+    // Spatial Position along track
+    this.distance = 18.0;
+    this.lateralOffset = 0.0;
+    this.verticalOffset = 0.0;
     this.verticalVelocity = 0.0;
 
+    // Wheel Geometry
+    this.wheelRadius = this.bike.wheelRadius; // 0.54m
+    this.wheelBase = this.bike.wheelBase;     // 1.62m
+    this.halfBase = this.wheelBase * 0.5;
+
     // Movement Dynamics
-    this.speed = 12.0; // Forward speed (m/s)
-    this.maxSpeed = 28.0; // Normal top speed ~100 km/h
-    this.boostMaxSpeed = 40.0; // Boosted top speed ~144 km/h
+    this.speed = 14.0;
+    this.maxSpeed = 30.0;     // ~108 km/h
+    this.boostMaxSpeed = 42.0; // ~151 km/h
     this.isGrounded = true;
     this.isBraking = false;
     this.isBoosting = false;
     this.boostTimer = 0.0;
 
-    // Air Rotation & Tricks
+    // Air Rotation & Trick Scoring
     this.airTime = 0.0;
-    this.airPitch = 0.0; // Aerial flip
-    this.airRoll = 0.0;  // Aerial whip
+    this.airPitch = 0.0;
+    this.airRoll = 0.0;
     this.totalFlips = 0;
     this.trickScore = 0;
 
     // Crash State
     this.isCrashed = false;
     this.crashTimer = 0.0;
-    this.lastCheckpointDistance = 15.0;
+    this.lastCheckpointDistance = 18.0;
 
-    // Temp vectors for allocations
-    this._pos = new THREE.Vector3();
+    // Pre-allocated vectors for 60fps zero-garbage execution
+    this._bikePos = new THREE.Vector3();
+    this._frontPos = new THREE.Vector3();
+    this._rearPos = new THREE.Vector3();
+    this._groundFront = new THREE.Vector3();
+    this._groundRear = new THREE.Vector3();
     this._tangent = new THREE.Vector3();
     this._normal = new THREE.Vector3();
+    this._up = new THREE.Vector3();
   }
 
   update(inputs, delta) {
     if (this.isCrashed) {
-      this._updateCrashState(delta);
+      this._updateCrash(delta);
       return;
     }
 
-    const currentSample = this.track.getSampleAtDistance(this.distance);
-    if (!currentSample) return;
+    const sample = this.track.getSampleAtDistance(this.distance);
+    if (!sample) return;
 
-    // 1. Check Nitro Boost
+    // 1. Nitro Boost Duration
     if (this.isBoosting) {
       this.boostTimer -= delta;
       if (this.boostTimer <= 0) {
@@ -60,157 +70,205 @@ export class BikePhysics {
       }
     }
 
-    // 2. Slope & Gravitational Acceleration
-    // Downhill slope = tangent.y (negative when descending)
-    const slopeFactor = -currentSample.tangent.y; // Positive downhill
-    const gravityAccel = Math.max(0, slopeFactor * 18.0);
+    // 2. Slope & Gravitational Force (Downhill vector)
+    const slope = -sample.tangent.y; // Positive downhill
+    const gravityAccel = Math.max(0, slope * 20.0);
 
-    // 3. Pedal / Brake inputs
+    // 3. Drive & Brake Accel
     let driveAccel = 0;
     if (inputs.pedal) {
-      // Pedaling efficiency drops as speed nears max
-      const cap = this.isBoosting ? this.boostMaxSpeed : this.maxSpeed;
-      if (this.speed < cap) {
-        driveAccel = 12.0 * (1 - this.speed / cap);
+      const topCap = this.isBoosting ? this.boostMaxSpeed : this.maxSpeed;
+      if (this.speed < topCap) {
+        driveAccel = 14.0 * (1.0 - this.speed / topCap);
       }
     }
 
-    // Braking
     this.isBraking = inputs.brake;
-    let brakeDecel = 0;
-    if (this.isBraking) {
-      brakeDecel = 24.0;
-    }
+    const brakeDecel = this.isBraking ? 26.0 : 0.0;
+    const drag = 0.003 * this.speed * this.speed + 0.65;
 
-    // Rolling Resistance & Air Drag
-    const drag = 0.0035 * this.speed * this.speed + 0.8;
-
-    // Forward speed integration
     if (this.isGrounded) {
       this.speed += (gravityAccel + driveAccel - brakeDecel - drag) * delta;
-      this.speed = Math.max(3.0, this.speed); // Keep rolling down
+      this.speed = Math.max(4.0, this.speed); // Always rolls forward on mountain
     }
 
-    // 4. Lateral Steering
-    const steerSens = 14.0 * Math.min(1.2, Math.max(0.4, this.speed / 15.0));
+    // 4. Lateral Steering with Soft Earthen Bank Containment
+    const steerSens = 14.5 * Math.min(1.2, Math.max(0.5, this.speed / 16.0));
     this.lateralOffset += inputs.steer * steerSens * delta;
-    // Clamp to track width
-    const maxOffset = this.track.trackWidth * 0.48;
-    this.lateralOffset = Math.max(-maxOffset, Math.min(maxOffset, this.lateralOffset));
 
-    // 5. Ground vs Air Physics
-    this._handleElevationAndAir(currentSample, inputs, delta);
+    // Shoulder Soft Boundary Restoring Force (Prevents flying into mountains)
+    const trackHalfW = this.track.trackWidth * 0.48;
+    if (Math.abs(this.lateralOffset) > trackHalfW) {
+      const excess = Math.abs(this.lateralOffset) - trackHalfW;
+      const pushDirection = -Math.sign(this.lateralOffset);
+      this.lateralOffset += pushDirection * excess * 4.0 * delta;
+      // Clamp to absolute playable shoulder
+      const absoluteMax = this.track.trackWidth * 0.75;
+      this.lateralOffset = THREE.MathUtils.clamp(this.lateralOffset, -absoluteMax, absoluteMax);
+    }
 
-    // 6. Check Item Collisions (Boost pads, Ramps, Coins, Checkpoints)
-    this._checkTriggers(currentSample);
+    // 5. Dual-Wheel Ground Detection & Airborne Simulation
+    this._updateDualWheelPhysics(sample, inputs, delta);
 
-    // 7. Update 3D Transform of Bike Mesh
-    this._updateTransform(currentSample, inputs, delta);
+    // 6. Check Item Triggers (Boost pads, Ramps, Stars, Checkpoints)
+    this._checkTriggers();
   }
 
-  _handleElevationAndAir(sample, inputs, delta) {
+  _updateDualWheelPhysics(sample, inputs, delta) {
+    // Forward integration
+    this.distance += this.speed * delta;
+    const nextSample = this.track.getSampleAtDistance(this.distance);
+    if (!nextSample) return;
+
+    // Calculate tentative Center Position
+    this._bikePos.copy(nextSample.point);
+    this._bikePos.addScaledVector(nextSample.normal, this.lateralOffset);
+
+    // Calculate Front and Rear Wheel XZ coordinates along current heading
+    const heading = nextSample.tangent.clone().normalize();
+    this._frontPos.copy(this._bikePos).addScaledVector(heading, this.halfBase);
+    this._rearPos.copy(this._bikePos).addScaledVector(heading, -this.halfBase);
+
+    // Sample Analytical Terrain Height under Front and Rear Wheels
+    const frontGroundY = this.track.getTerrainElevation(this._frontPos.x, this._frontPos.z);
+    const rearGroundY = this.track.getTerrainElevation(this._rearPos.x, this._rearPos.z);
+    const avgGroundY = (frontGroundY + rearGroundY) * 0.5;
+
     if (this.isGrounded) {
-      // Check for terrain ramps / sudden drops
-      const nextDist = this.distance + this.speed * delta;
-      const nextSample = this.track.getSampleAtDistance(nextDist);
+      // Check for sudden drop / airborne takeoff (kicker ramps or steep drop-offs)
+      const slopeDrop = nextSample.point.y - sample.point.y;
+      const expectedSlopeDrop = sample.tangent.y * (this.speed * delta);
 
-      if (nextSample) {
-        const elevationDiff = nextSample.point.y - sample.point.y;
-        const expectedDrop = sample.tangent.y * (this.speed * delta);
-
-        // If road drops faster than gravity, bike launches into air
-        if (elevationDiff < expectedDrop - 1.2 && this.speed > 16) {
-          this.isGrounded = false;
-          this.verticalVelocity = Math.max(4.0, this.speed * 0.25);
-          this.airTime = 0;
-          this.airPitch = 0;
-        }
+      if (slopeDrop < expectedSlopeDrop - 1.4 && this.speed > 16.0) {
+        this.isGrounded = false;
+        this.verticalVelocity = Math.max(4.5, this.speed * 0.28);
+        this.verticalOffset = 0.1;
+        this.airTime = 0.0;
+        this.airPitch = 0.0;
+        this.airRoll = 0.0;
+      } else {
+        // Firmly Grounded: Wheel contact constraint
+        this.verticalOffset = 0.0;
+        this._bikePos.y = avgGroundY + this.wheelRadius;
       }
-
-      this.distance += this.speed * delta;
-      this.verticalOffset = 0;
     } else {
-      // Airborne!
+      // Airborne Trajectory
       this.airTime += delta;
-      this.distance += this.speed * delta;
-
-      // Gravity pulls down
-      this.verticalVelocity -= 28.0 * delta;
+      this.verticalVelocity -= 26.0 * delta; // Gravity
       this.verticalOffset += this.verticalVelocity * delta;
 
-      // Aerial Tricks: Pitch (front/back flips) and Tilt
+      // Aerial Tricks
       if (inputs.pedal) {
-        this.airPitch += 3.5 * delta; // Backflip
+        this.airPitch += 3.8 * delta; // Backflip
       } else if (inputs.brake) {
-        this.airPitch -= 3.5 * delta; // Frontflip
+        this.airPitch -= 3.8 * delta; // Frontflip
       }
-      this.airRoll += inputs.steer * 4.0 * delta;
+      this.airRoll += inputs.steer * 4.2 * delta;
 
-      // Landing detection
-      if (this.verticalOffset <= 0) {
-        this._handleLanding(sample);
+      this._bikePos.y = avgGroundY + this.wheelRadius + this.verticalOffset;
+
+      // Landing Detection: When vertical offset touches ground
+      if (this.verticalOffset <= 0.0) {
+        this._handleLanding(frontGroundY, rearGroundY);
       }
     }
+
+    // Frame Pitch Angle derived from Front vs Rear wheel terrain elevation
+    const terrainPitch = Math.atan2(frontGroundY - rearGroundY, this.wheelBase);
+
+    // Update 3D Mesh Transform
+    this._applyTransform(nextSample, terrainPitch, inputs, delta);
   }
 
-  _handleLanding(sample) {
-    this.verticalOffset = 0;
-    this.verticalVelocity = 0;
+  _handleLanding(frontGroundY, rearGroundY) {
+    this.verticalOffset = 0.0;
+    this.verticalVelocity = 0.0;
     this.isGrounded = true;
 
-    // Check angle alignment
-    const flipDeg = Math.abs(this.airPitch * (180 / Math.PI)) % 360;
-    const isUpright = (flipDeg < 55 || flipDeg > 305);
+    // Check angular alignment on landing
+    const pitchDeg = (Math.abs(this.airPitch) * 180 / Math.PI) % 360;
+    const isCleanLanding = (pitchDeg < 55 || pitchDeg > 305);
 
-    if (isUpright) {
-      // Clean landing! Check for completed flips
-      const completedFlips = Math.round(Math.abs(this.airPitch) / (Math.PI * 2));
-      if (completedFlips > 0) {
-        this.totalFlips += completedFlips;
-        this.trickScore += completedFlips * 500;
-        // Reward with mini nitro boost!
-        this.triggerBoost(1.2);
+    if (isCleanLanding) {
+      const flips = Math.round(Math.abs(this.airPitch) / (Math.PI * 2));
+      if (flips > 0) {
+        this.totalFlips += flips;
+        this.trickScore += flips * 600;
+        this.triggerBoost(1.5);
+        if (this.onTrick) this.onTrick(`${flips}x BACKFLIP! +${flips * 600}`);
+      } else if (this.airTime > 0.8) {
+        this.trickScore += 250;
+        this.triggerBoost(1.0);
+        if (this.onTrick) this.onTrick('PERFECT LANDING! +250');
       }
-      this.airPitch = 0;
-      this.airRoll = 0;
-      this.airTime = 0;
+      this.airPitch = 0.0;
+      this.airRoll = 0.0;
+      this.airTime = 0.0;
     } else {
-      // Crash / Wipeout!
+      // Wipeout / Crash on bad landing
       this.triggerCrash();
     }
   }
 
-  _checkTriggers(sample) {
-    // 1. Boost pads
+  _applyTransform(sample, terrainPitch, inputs, delta) {
+    // 1. Position
+    this.bike.root.position.copy(this._bikePos);
+
+    // 2. Base Forward Orientation along track spline
+    const baseQuat = new THREE.Quaternion().setFromUnitVectors(
+      new THREE.Vector3(0, 0, 1),
+      sample.tangent.clone().normalize()
+    );
+
+    // 3. Terrain Slope Pitch alignment
+    const pitchQuat = new THREE.Quaternion().setFromAxisAngle(
+      new THREE.Vector3(1, 0, 0),
+      this.isGrounded ? terrainPitch : this.airPitch
+    );
+
+    // 4. Aerial Roll (if in air)
+    const rollQuat = new THREE.Quaternion().setFromAxisAngle(
+      new THREE.Vector3(0, 0, 1),
+      this.airRoll
+    );
+
+    baseQuat.multiply(pitchQuat).multiply(rollQuat);
+    this.bike.root.quaternion.slerp(baseQuat, delta * 20);
+
+    // 5. Update Bike Component Visuals
+    this.bike.updateVisuals(this.speed, inputs.steer, inputs.pedal, this.lateralOffset, delta);
+  }
+
+  _checkTriggers() {
+    // Boost Pads
     this.track.boostPads.forEach(pad => {
-      if (Math.abs(this.distance - pad.distance) < 4.0) {
+      if (Math.abs(this.distance - pad.distance) < 4.2) {
         this.triggerBoost(2.5);
       }
     });
 
-    // 2. Jump Ramps
+    // Jump Ramps
     this.track.ramps.forEach(ramp => {
-      if (Math.abs(this.distance - ramp.distance) < 3.0 && this.isGrounded) {
+      if (Math.abs(this.distance - ramp.distance) < 3.2 && this.isGrounded) {
         this.isGrounded = false;
         this.verticalVelocity = ramp.boostPower + (this.speed * 0.35);
-        this.airTime = 0;
+        this.airTime = 0.0;
       }
     });
 
-    // 3. Collectibles
-    this.track.collectibles.forEach(coin => {
-      if (!coin.collected && Math.abs(coin.position.z - this.bike.root.position.z) < 2.5) {
-        const dist = coin.position.distanceTo(this.bike.root.position);
-        if (dist < 2.2) {
-          coin.collected = true;
-          coin.mesh.visible = false;
-          this.trickScore += 100;
+    // Collectible Stars
+    this.track.collectibles.forEach(star => {
+      if (!star.collected && Math.abs(star.position.z - this.bike.root.position.z) < 2.5) {
+        if (star.position.distanceTo(this.bike.root.position) < 2.5) {
+          star.collected = true;
+          star.mesh.visible = false;
+          this.trickScore += 150;
           if (this.onCoinCollect) this.onCoinCollect();
         }
       }
     });
 
-    // 4. Checkpoints
+    // Checkpoints
     this.track.checkpoints.forEach(cp => {
       if (!cp.passed && this.distance >= cp.distance) {
         cp.passed = true;
@@ -234,67 +292,31 @@ export class BikePhysics {
     if (this.onCrash) this.onCrash();
   }
 
-  _updateCrashState(delta) {
+  _updateCrash(delta) {
     this.crashTimer -= delta;
-    this.speed = Math.max(0, this.speed - delta * 25.0);
+    this.speed = Math.max(0, this.speed - delta * 28.0);
 
     if (this.crashTimer <= 0) {
-      // Respawn at last checkpoint
+      // Clean respawn at checkpoint
       this.isCrashed = false;
       this.distance = this.lastCheckpointDistance;
-      this.lateralOffset = 0;
-      this.verticalOffset = 0;
-      this.verticalVelocity = 0;
+      this.lateralOffset = 0.0;
+      this.verticalOffset = 0.0;
+      this.verticalVelocity = 0.0;
       this.speed = 14.0;
       this.isGrounded = true;
-      this.airPitch = 0;
-      this.airRoll = 0;
+      this.airPitch = 0.0;
+      this.airRoll = 0.0;
       this.bike.setWipeoutRagdoll(false);
     }
   }
 
-  _updateTransform(sample, inputs, delta) {
-    // 1. Calculate World Position: spline sample point + lateral offset + vertical jump offset
-    this._pos.copy(sample.point);
-    this._pos.addScaledVector(sample.normal, this.lateralOffset);
-    this._pos.y += 0.52 + this.verticalOffset; // 0.52 = wheel center height
-    this.bike.root.position.copy(this._pos);
-
-    // 2. Calculate Orientation
-    const heading = sample.tangent.clone().normalize();
-    const up = sample.binormal.clone().normalize();
-
-    // Base matrix looking forward along track
-    const targetQuat = new THREE.Quaternion().setFromUnitVectors(
-      new THREE.Vector3(0, 0, 1),
-      heading
-    );
-
-    // Aerial rotations or ground pitch
-    if (!this.isGrounded) {
-      const pitchQuat = new THREE.Quaternion().setFromAxisAngle(
-        new THREE.Vector3(1, 0, 0),
-        this.airPitch
-      );
-      const rollQuat = new THREE.Quaternion().setFromAxisAngle(
-        new THREE.Vector3(0, 0, 1),
-        this.airRoll
-      );
-      targetQuat.multiply(pitchQuat).multiply(rollQuat);
-    }
-
-    this.bike.root.quaternion.slerp(targetQuat, delta * 18);
-
-    // 3. Update Bike Component Visuals (Wheels, pedals, handlebars, lean)
-    this.bike.updateVisuals(this.speed, inputs.steer, inputs.pedal, this.lateralOffset, delta);
-  }
-
   reset() {
-    this.distance = 15.0;
+    this.distance = 18.0;
     this.lateralOffset = 0.0;
     this.verticalOffset = 0.0;
     this.verticalVelocity = 0.0;
-    this.speed = 12.0;
+    this.speed = 14.0;
     this.isGrounded = true;
     this.isBraking = false;
     this.isBoosting = false;
@@ -304,7 +326,7 @@ export class BikePhysics {
     this.airRoll = 0.0;
     this.totalFlips = 0;
     this.trickScore = 0;
-    this.lastCheckpointDistance = 15.0;
+    this.lastCheckpointDistance = 18.0;
     this.bike.setWipeoutRagdoll(false);
   }
 }

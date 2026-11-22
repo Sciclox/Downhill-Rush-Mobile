@@ -11,16 +11,20 @@ export class Game {
   constructor(canvasContainer) {
     this.container = canvasContainer;
 
-    // Core Three.js systems
+    // Three.js Systems
     this.scene = new THREE.Scene();
-    this.camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 1200);
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+    this.camera = new THREE.PerspectiveCamera(64, window.innerWidth / window.innerHeight, 0.1, 1400);
+    this.renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      powerPreference: 'high-performance'
+    });
 
-    // Game state
-    this.state = 'RACING'; // 'RACING', 'FINISHED'
-    this.score = 0;
+    // Game State
+    this.state = 'RACING';
     this.coinsCount = 0;
-    this.cameraShake = 0;
+    this.cameraShake = 0.0;
+    this.camCurrentPos = new THREE.Vector3();
+    this.camTargetPos = new THREE.Vector3();
 
     this._initRenderer();
     this._initSubsystems();
@@ -33,41 +37,29 @@ export class Game {
 
   _initRenderer() {
     this.renderer.setSize(window.innerWidth, window.innerHeight);
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // High res on mobile, capped at 2 for performance
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.1;
+    this.renderer.toneMappingExposure = 1.15;
 
     this.container.appendChild(this.renderer.domElement);
   }
 
   _initSubsystems() {
-    // 1. Audio
     this.audio = new SoundEffects();
-
-    // 2. Lighting & Environment
     this.environment = new SkyAndLighting(this.scene);
-
-    // 3. Track
     this.track = new TrackManager(this.scene);
-
-    // 4. Bike & Rider
     this.bike = new Bike(this.scene);
-
-    // 5. Physics
     this.physics = new BikePhysics(this.track, this.bike);
-
-    // 6. Particles
     this.particles = new ParticleManager(this.scene);
 
-    // 7. Touch & Input
     this.controller = new TouchController(() => {
       this.audio.init();
       this.audio.resume();
     });
 
-    // Subsystem Event Callbacks
+    // Event hooks
     this.physics.onBoost = () => {
       this.audio.playBoost();
       this.cameraShake = 0.45;
@@ -75,8 +67,13 @@ export class Game {
 
     this.physics.onCrash = () => {
       this.audio.playCrash();
-      this.cameraShake = 0.8;
-      this._showBanner('WIPEOUT!', 'rgb(255, 68, 68)');
+      this.cameraShake = 0.85;
+      this._showBanner('WIPEOUT!', '#ff4444');
+    };
+
+    this.physics.onTrick = (text) => {
+      this.audio.playTrickBonus();
+      this._showBanner(text, '#ffea00');
     };
 
     this.physics.onCoinCollect = () => {
@@ -105,27 +102,31 @@ export class Game {
 
   animate() {
     requestAnimationFrame(this.animate);
-    const delta = Math.min(0.05, this.clock.getDelta()); // Cap delta to prevent glitching
+    const delta = Math.min(0.04, this.clock.getDelta());
 
     const inputs = this.controller.getInputs();
 
-    // 1. Physics update
+    // 1. Dual-Wheel Physics update
     this.physics.update(inputs, delta);
 
-    // 2. Environment & Items update
+    // 2. Track & Environment Follow
     this.track.update(delta);
     this.environment.updateFollow(this.bike.root.position);
 
-    // 3. Particles & Tire Dust
+    // 3. Particles
     const speedRatio = this.physics.speed / this.physics.boostMaxSpeed;
     if (this.physics.isGrounded && this.physics.speed > 5) {
       const rearWheelPos = this.bike.root.position.clone();
-      rearWheelPos.y -= 0.4;
-      this.particles.emitDust(rearWheelPos, this.bike.root.getWorldDirection(new THREE.Vector3()), inputs.brake ? 3 : 1);
+      rearWheelPos.y -= 0.35;
+      this.particles.emitDust(
+        rearWheelPos,
+        this.bike.root.getWorldDirection(new THREE.Vector3()),
+        inputs.brake ? 3 : 1
+      );
     }
     this.particles.update(this.bike.root.position, speedRatio, delta);
 
-    // 4. Audio Continuous Update
+    // 4. Audio Update
     this.audio.updateContinuous(speedRatio, this.physics.isGrounded, inputs.pedal);
     if (inputs.brake && this.physics.isGrounded && this.physics.speed > 10) {
       this.audio.playSkid();
@@ -150,53 +151,56 @@ export class Game {
     const bikePos = this.bike.root.position;
     const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(this.bike.root.quaternion);
 
-    // Offset behind and above bike
-    const camDistance = 5.2 + speedRatio * 1.5;
-    const camHeight = 2.4;
-    const targetCamPos = bikePos.clone()
+    // Chase camera trailing distance & height
+    const camDistance = 5.4 + speedRatio * 1.6;
+    const camHeight = 2.45;
+
+    this.camTargetPos.copy(bikePos)
       .addScaledVector(forward, -camDistance)
       .add(new THREE.Vector3(0, camHeight, 0));
 
-    // Smooth camera lag (damping)
-    this.camera.position.lerp(targetCamPos, delta * 9);
+    // Smooth camera interpolation
+    this.camera.position.lerp(this.camTargetPos, delta * 9.5);
 
-    // Camera look ahead along bike trajectory
-    const lookTarget = bikePos.clone().addScaledVector(forward, 4.0).add(new THREE.Vector3(0, 0.8, 0));
+    // Target look-ahead along track trajectory
+    const lookTarget = bikePos.clone()
+      .addScaledVector(forward, 4.2)
+      .add(new THREE.Vector3(0, 0.7, 0));
 
-    // Camera Shake
+    // Camera shake (from landings or wipeouts)
     if (this.cameraShake > 0) {
       this.camera.position.x += (Math.random() - 0.5) * this.cameraShake;
       this.camera.position.y += (Math.random() - 0.5) * this.cameraShake;
-      this.cameraShake = Math.max(0, this.cameraShake - delta * 1.8);
+      this.cameraShake = Math.max(0, this.cameraShake - delta * 2.0);
     }
 
     this.camera.lookAt(lookTarget);
 
-    // Speed FOV expansion (62deg normal -> 82deg at top speed)
-    const targetFOV = 62 + speedRatio * 20;
-    this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, targetFOV, delta * 5);
+    // Dynamic Speed FOV expansion (64deg normal -> 84deg at peak boost)
+    const targetFOV = 64 + speedRatio * 20;
+    this.camera.fov = THREE.MathUtils.lerp(this.camera.fov, targetFOV, delta * 6);
     this.camera.updateProjectionMatrix();
   }
 
   _updateHUD(speedRatio) {
-    // Speedometer (km/h)
+    // Speedometer
     const speedKmh = Math.round(this.physics.speed * 3.6);
     const speedEl = document.getElementById('speed-value');
     if (speedEl) speedEl.textContent = speedKmh;
 
-    // Progress bar
+    // Track Progress
     const progress = Math.min(100, Math.round((this.physics.distance / this.track.finishZ) * 100));
     const progBar = document.getElementById('progress-fill');
     if (progBar) progBar.style.width = `${progress}%`;
 
-    // Nitro gauge
+    // Nitro Bar
     const nitroFill = document.getElementById('nitro-fill');
     if (nitroFill) {
       const nitroPercent = this.physics.isBoosting ? (this.physics.boostTimer / 2.5) * 100 : 0;
       nitroFill.style.width = `${nitroPercent}%`;
     }
 
-    // Score UI
+    // Score
     const scoreEl = document.getElementById('score-value');
     if (scoreEl) scoreEl.textContent = this.physics.trickScore;
   }
@@ -214,7 +218,7 @@ export class Game {
     banner.classList.add('visible');
     setTimeout(() => {
       banner.classList.remove('visible');
-    }, 1400);
+    }, 1500);
   }
 
   _handleFinish() {
@@ -225,7 +229,7 @@ export class Game {
     const finishOverlay = document.getElementById('finish-overlay');
     const finalScore = document.getElementById('final-score');
     if (finishOverlay) finishOverlay.classList.remove('hidden');
-    if (finalScore) finalScore.textContent = this.physics.trickScore + (this.coinsCount * 250);
+    if (finalScore) finalScore.textContent = this.physics.trickScore + (this.coinsCount * 300);
   }
 
   restartGame() {
@@ -233,7 +237,6 @@ export class Game {
     this.coinsCount = 0;
     this.physics.reset();
 
-    // Reset collectibles
     this.track.collectibles.forEach(c => {
       c.collected = false;
       c.mesh.visible = true;
